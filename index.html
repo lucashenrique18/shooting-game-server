@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Client</title>
+    <style>
+      body {
+				display: flex;
+				justify-content: center;
+				align-items: center;
+				height: 100vh;
+				background: #eee;
+				margin: 0;
+				font-family: Arial, sans-serif;
+			}
+			#container {
+				display: flex;
+			}
+			canvas {
+				background: white;
+				border: 2px solid #ccc;
+			}
+			#ranking {
+				margin-left: 20px;
+				font-size: 14px;
+				color: #444;
+			}
+			#ranking h3 {
+				margin: 0 0 10px 0;
+			}
+    </style>
+</head>
+<body>
+<div>
+    <button onclick="createMatch()">Create Match</button>
+    <button onclick="joinMatch()">Join Match</button>
+    <button onclick="getAllPossibleMatches()">Get All Possible Matches</button>
+		<select id="matchesSelect"></select>
+    <hr/>
+		<p id="fps"></p>
+		<p id="ping"></p>
+    <div id="container">
+			<canvas id="gameCanvas" width="800" height="600"></canvas>
+			<div id="ranking">
+					<h3>Online Players</h3>
+					<ul id="playerList"></ul>
+			</div>
+    </div>
+</div>
+<div id="messages"></div>
+
+<script>
+    let ws;
+    let matchId
+    const playerId = Math.random().toString(36).substring(2, 15);
+		const matchesSelect = document.getElementById("matchesSelect");
+		const canvas = document.getElementById("gameCanvas");
+		const ctx = canvas.getContext("2d")
+		const tileSize = 40; // tamanho fixo do tile
+		let tileCount = Math.floor(canvas.width / tileSize);
+		let gridSize = tileSize;
+		let inMatch = false
+		let players = {}
+
+    function connect() {
+        ws = new WebSocket(`ws://localhost:8080/ws?playerId=${playerId}`);
+
+        ws.onopen = function() {
+            console.log("Connected to WebSocket server");
+        };
+
+        ws.onmessage = function(event) {
+						handleMessage(event.data)
+        };
+
+        ws.onclose = function() {
+            console.log("WebSocket connection closed, retrying...");
+            setTimeout(connect, 1000); // Reconnect after 1 second
+        };
+
+        ws.onerror = function(error) {
+            console.error("WebSocket error:", error);
+        };        
+    }
+
+		let pingStart = 0;
+		function sendPing() {
+			if (ws && ws.readyState === WebSocket.OPEN && inMatch) {
+				pingStart = performance.now();
+				ws.send(JSON.stringify({ eventName: "ping" }));
+			}
+		}
+		setInterval(sendPing, 1000);
+
+    function sendMessage() {
+        let input = document.getElementById("messageInput");
+        let message = input.value;
+        ws.send(message);
+        input.value = "";
+    }
+
+		function handleMessage(event) {
+			const msg = JSON.parse(event);
+			if (msg.event === "GAMESTATE") {
+				updatePlayerList(msg.data.players);
+				updateGameState(msg.data);
+				players = msg.data?.players || {}
+			} if (msg.event === "pong") {
+				const ping = Math.round(performance.now() - pingStart);
+				document.getElementById("ping").innerText = `Ping: ${ping} ms`;
+			}
+		}
+
+		function updatePlayerList(players) {
+			const playerList = document.getElementById("playerList");
+			playerList.innerHTML = "";
+			for (const [id, player] of Object.entries(players)) {
+				const li = document.createElement("li");
+				li.textContent = `${player.name} - Score: ${player.score}`;
+				playerList.appendChild(li);
+			}
+		}
+
+		function updateGameState(state) {
+			if (canvas.width != state.matchMap.width) {
+				canvas.width = state.matchMap.width;
+				tileCount = Math.floor(canvas.width / tileSize);
+        gridSize = tileSize;
+			}
+			if (canvas.height != state.matchMap.height) {
+				canvas.height = state.matchMap.height;
+			}
+		}
+
+    async function createMatch() {
+        const response = await fetch('http://localhost:8081/create-match', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ maxPlayers: 4, maxTime: 10, maxScore: 20})
+        })
+        const data = await response.json();
+    }
+
+    async function joinMatch() {
+				if (!matchId) {
+					alert("Please select a match first.");
+					return;
+				}
+        console.log("Joining match:", matchId)
+				try {
+					const response = await fetch('http://localhost:8081/join-match', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ matchId, playerName: playerId })
+        	});
+					inMatch = true
+					startGame()
+				} catch (error) {
+					console.error("Error starting game:", error)
+				}
+    }
+
+		async function getAllPossibleMatches() {
+			try {
+				const response = await fetch('http://localhost:8081/matches', {
+						method: 'GET',
+						headers: {
+								'Content-Type': 'application/json'
+						}
+				})
+				const data = await response.json();
+				console.log("Response data:", data)
+
+				matchesSelect.innerHTML = ""; // Limpa opções anteriores
+				data.forEach(matchId => {
+						const option = document.createElement("option");
+						option.value = matchId;
+						option.textContent = `Match - ${matchId}`;
+						matchesSelect.appendChild(option);
+				});
+				matchesSelect.onchange = () => {
+						matchId = matchesSelect.value;
+				}
+			} catch (error) {
+				console.error("Error fetching matches:", error)
+			}
+		}
+
+		function movePlayer(direction) {
+			if (direction === "up" && players[playerId].y <= 0) return;
+			if (direction === "down" && players[playerId].y >= (canvas.height / gridSize) - 1) return;
+			if (direction === "left" && players[playerId].x <= 0) return;
+			if (direction === "right" && players[playerId].x >= (canvas.width / gridSize) - 1) return;
+
+			sendMessageToWs({eventName: "move", payload: { direction }});
+		}
+
+		function sendMessageToWs(msg) {
+			if (inMatch === false) {
+				alert("You must join a match first.");
+				return;
+			}
+			if (!ws || ws.readyState !== WebSocket.OPEN) {
+				alert("WebSocket is not connected.");
+				return;
+			}
+			ws.send(JSON.stringify(msg));
+		}
+
+		document.addEventListener("keydown", (event) => {
+      switch (event.key) {
+        case "ArrowUp":
+          movePlayer("up")
+          break
+        case "ArrowDown":
+          movePlayer("down")
+          break
+        case "ArrowLeft":
+          movePlayer("left")
+          break
+        case "ArrowRight":
+          movePlayer("right")
+          break
+      }
+    })
+
+
+		let playerX = 10
+		let playerY = 10
+		function drawBoard() {
+      ctx.fillStyle = "#fff" // Fundo do canvas branco
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+      ctx.strokeStyle = "#eee" // Linhas da grade cinza claro
+      for (let i = 0; i < tileCount; i++) {
+        ctx.beginPath()
+        ctx.moveTo(i * gridSize, 0)
+        ctx.lineTo(i * gridSize, canvas.height)
+        ctx.stroke()
+
+        ctx.beginPath()
+        ctx.moveTo(0, i * gridSize)
+        ctx.lineTo(canvas.width, i * gridSize)
+        ctx.stroke()
+      }
+    }
+
+		function drawAllPlayers() {
+			for (const [id, player] of Object.entries(players)) {
+				const color = stringToColor(player.name);
+				drawPlayer(player.x, player.y, color);
+			}
+		}
+
+		function drawPlayer(x, y, color = "lime") {
+      ctx.fillStyle = color
+      ctx.fillRect(x * gridSize, y * gridSize, gridSize, gridSize)
+    }
+
+		function render() {
+      drawBoard()
+      drawAllPlayers()
+    }
+
+    let lastTime = performance.now();
+		let frames = 0;
+
+		function gameLoop() {
+			render();
+			frames++;
+			const now = performance.now();
+			if (now - lastTime >= 1000) { // 1 segundo passou
+				document.getElementById("fps").innerText = `FPS: ${frames}`;
+				frames = 0;
+				lastTime = now;
+			}
+			requestAnimationFrame(gameLoop);
+		}
+
+		function startGame() {
+			requestAnimationFrame(gameLoop)
+		}
+		
+		connect()
+
+		// funcao para definir uma color com base em um string e nao pode ser branca e nem cinza
+		function stringToColor(str) {
+			let hash = 0;
+			for (let i = 0; i < str.length; i++) {
+				hash = str.charCodeAt(i) + ((hash << 5) - hash);
+			}
+			let color = '#';
+			for (let i = 0; i < 3; i++) {
+				const value = (hash >> (i * 8)) & 0xFF;
+				color += ('00' + value.toString(16)).substr(-2);
+			}
+			if (color === '#ffffff' || color === '#eeeeee') {
+				return stringToColor(str + 'x'); // Adiciona um caractere extra para mudar a cor
+			}
+			return color;
+		}
+
+</script>
+</body>
+</html>
